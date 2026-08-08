@@ -1,0 +1,26 @@
+# Never vendor model weights or runtime binaries into this repo.
+models/
+*.gguf
+*.bin
+
+# Local runtime/session artifacts, logs, secrets
+*.log
+*.pid
+*.key
+api-key
+.env
+.local-runtime/
+runs/
+
+# Python
+__pycache__/
+*.pyc
+
+# garak (optional heavy dep for the readiness smoke) — isolated venv
+.garak-venv/
+
+# macOS
+.DS_Store
+
+# Editor / tool local settings
+.claude/settings.local.json

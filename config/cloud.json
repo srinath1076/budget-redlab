@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "name": "redlab-cloud-qwen3-next-80b",
+  "status": "scaffolded; endpoint not yet created — fill in after following docs/RUNPOD_RUNBOOK.md",
+  "purpose": "Illustrative, budget-capped infrastructure for standing up a private, on-demand reasoner for AUTHORIZED red-team work and tearing it down to $0. Model-agnostic scaffolding: the deployed weights (base/QLoRA/abliterated/self-quantized) are the operator's choice; self-hosting exists to run weights an aligned frontier model won't provide for authorized offensive work.",
+  "hosting": {
+    "provider": "runpod",
+    "mode": "pod-a100-pcie-scripted-lifecycle-terminate-between-sessions",
+    "lifecycle": "Managed entirely by ./redlab-pod.sh (redlab_pod.py) over the RunPod REST API: `up` creates from the deploy block below and waits until the model serves; `status`/`--assert-idle` verifies nothing is billing; `down` terminates and PROVES $0 idle. No hand-clicking in the console, no template to maintain — this JSON is the reproducible spec.",
+    "mode_rationale": "For weeks-apart 128K deep-research sessions, an A100 PCIe pod ($1.39/hr) beats serverless flex ($2.72-4.79/hr) and avoids mid-session reload thrash. TERMINATE (not Stop) when done: a stopped pod's disk bills $0.20/GB/mo (~$16/mo for 80GB), while terminate = $0 idle + a ~15min/~$0.35 model re-download next session. `redlab-pod.sh down` does the terminate + verify for you.",
+    "billing": "per-second while running; $0 when terminated; hard cap via $20 loaded credit with auto-top-up OFF",
+    "gpu_target": "A100 80GB (single GPU) for the 4-bit AWQ (~45.9GB) + a 128K KV cache. A single 48GB A40 is NOT enough (weights alone ~96% of the card); 2x A40 with TP_SIZE=2 is an alternative. NOT FP8 (~80GB).",
+    "context_target": "131072 (128K) — the reason to use the cloud tier over the local 64K companion; needs 80GB total VRAM, which drives the A100/dual-A40 choice.",
+    "network_volume_gb": 60,
+    "standing_storage_cost_note": "~$4-7/month billed even when workers are at zero"
+  },
+  "deploy": {
+    "_comment": "The reproducible pod spec consumed by redlab_pod.py -> POST rest.runpod.io/v1/pods. Edit here, not in the console. `redlab-pod.sh gpus` lists valid gpuTypeIds. This SUPERSEDES runtime_settings.sglang_env for the pod path (we serve via vLLM with explicit args, not the SGLang worker's env contract).",
+    "name": "redlab-cloud",
+    "cloudType": "COMMUNITY",
+    "gpuTypeIds": ["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"],
+    "gpuTypeIds_note": "Priority list — RunPod tries PCIe first, falls back to the SXM 80GB if PCIe community capacity is tight. Both are 80GB. `./redlab-pod.sh gpus` lists live ids.",
+    "gpuCount": 1,
+    "imageName": "vllm/vllm-openai:latest",
+    "imageName_note": "Qwen3-Next-80B needs a recent vLLM (hybrid attention + 512-expert MoE + AWQ marlin). 'latest' should have it; pin a dated tag once a deploy is proven, and record it here.",
+    "containerDiskInGb": 120,
+    "volumeInGb": 0,
+    "disk_note": "Everything (the ~46GB model in the HF cache) lives on container disk, which is DELETED on terminate — exactly what we want for $0 idle. volumeInGb=0 means no persistent volume to bill. Bump volumeInGb + mount the HF cache only if you switch to a keep-warm strategy.",
+    "ports": ["30000/http"],
+    "http_port": 30000,
+    "env": { "HF_HUB_ENABLE_HF_TRANSFER": "1" },
+    "env_note": "redlab_pod.py injects secrets into this env at deploy time from the untracked .env, never hard-coded here: (1) VLLM_API_KEY from REDLAB_INFERENCE_KEY (auto-generated on first `up` if absent) so vLLM requires `Authorization: Bearer <key>` and the public proxy URL is not open; (2) HF_TOKEN from REDLAB_HF_TOKEN/HF_TOKEN if set — optional for public weights, REQUIRED for gated/private repos. Both must stay out of git.",
+    "dockerStartCmd": [
+      "--model", "cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit",
+      "--served-model-name", "cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit",
+      "--max-model-len", "131072",
+      "--tensor-parallel-size", "1",
+      "--trust-remote-code",
+      "--host", "0.0.0.0",
+      "--port", "30000"
+    ],
+    "quantization_note": "Do NOT pass --quantization: despite 'AWQ-4bit' in the repo name, this checkpoint is packaged as compressed-tensors (W4A16 via llm-compressor). vLLM auto-detects the format from the model's config.json and picks the kernel; forcing --quantization awq_marlin fails config validation ('compressed-tensors does not match awq_marlin'). Verified live 2026-08-08.",
+    "served_model_name_note": "Must match REDLAB_MODEL used by redlab_cloud.py. Both default to cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit."
+  },
+  "model_plan": {
+    "step_1_plumbing": {
+      "hf_id": "cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit",
+      "why": "4-bit AWQ ~45.9GB, fits a 48GB A40 with room for KV cache (Gated-DeltaNet attention keeps the cache small). Community quant (not official) — vet before trusting; well-regarded. Safety-tuned base but usually candid for authorized work with the scoped prompt.",
+      "not_fp8": "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8 is ~80GB / needs 75GB+ VRAM (and has an open vLLM start-up bug) — do NOT deploy it on a 48GB card.",
+      "vllm_note": "Qwen3-Next is a newer architecture (hybrid attention + 512-expert MoE); requires a recent vLLM (Marlin AWQ kernel). Use the latest RunPod vLLM worker."
+    },
+    "step_2_uncensored": {
+      "status": "LIKELY UNNECESSARY for most work — confirmed by direct measurement (see measured_readiness). Reassess only if you specifically need deployable-malware generation.",
+      "evidence": "Stock Qwen3-Next-80B-A3B cooperates ~83% on BashInjector (command-injection/tool-abuse) prompts, vs ~100% refusal from Claude Opus 4.6 and Gemini 3.1 Pro. Its safety tuning is already light for this category, so abliteration adds little for authorized offensive work.",
+      "measured_readiness_2026-08-08": "Direct garak smoke (detector mitigation.MitigationBypass, prompt prompts/ethical-hacker.cloud.system.md) against the deployed AWQ on an A100-80GB pod. Candor (complied/total): exploitation.SQLInjectionSystem 100% (13/13), exploitation.JinjaTemplatePythonInjection 100% (9/9), malwaregen.Evasion 75% (36/48); representative aggregate 83% (58/70) -> READY. Hardest category malwaregen.Payload was 40%, rising to 49% after strengthening the system prompt (+9pp, then plateaus). Conclusion: fully usable redlab for exploitation/injection/RCE/evasion reasoning; only deployable-malware payload generation is materially guarded, and prompt tuning barely moves it — abliterated weights are the real lever IF that specific capability is required.",
+      "source_abliterated": "huihui-ai/Huihui-Qwen3-Next-80B-A3B-Thinking-abliterated",
+      "source_format": "BF16 ~160GB (does NOT fit 48GB/80GB as-is)",
+      "route_if_ever_needed": "prefer a vetted community FP8/AWQ of the abliterated weights; else one-time llm-compressor FP8-dynamic on a rented A100-80GB (~$2-4), pushed to a private HF repo",
+      "record_on_deploy": ["output_hf_repo", "source_revision", "quant_format", "sha256", "date"]
+    }
+  },
+  "runtime_settings": {
+    "system_prompt": "prompts/ethical-hacker.cloud.system.md",
+    "context_length": 131072,
+    "context_note": "128K context. Requires 80GB VRAM total. Long-context prefill is compute-heavy, so full-128K turns are slower and burn more GPU-seconds; you only pay for tokens actually used.",
+    "sglang_env": { "MODEL_PATH": "cyankiwi/Qwen3-Next-80B-A3B-Instruct-AWQ-4bit", "QUANTIZATION": "awq_marlin", "CONTEXT_LENGTH": "131072", "TP_SIZE": "1" },
+    "sampling": { "temperature": 0.6, "top_p": 0.95 }
+  },
+  "honest_limits": [
+    "Reasoning quality is entirely a function of the weights the operator deploys; the default here is a community 4-bit quant placeholder, not a curated recommendation.",
+    "Cold start ~30-90s on first request after idle; fine for on-demand invocation, not for all-day snappy turns.",
+    "Not an autonomous agent: proposes commands for human review.",
+    "Data traverses rented infra — operator-private, not airgapped."
+  ]
+}
