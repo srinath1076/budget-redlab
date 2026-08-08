@@ -24,3 +24,6 @@ __pycache__/
 
 # Editor / tool local settings
 .claude/settings.local.json
+
+# Local-only technical handoff / writeup source (not for the public repo)
+docs/HANDOFF.md
